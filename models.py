@@ -1,3 +1,4 @@
+from platform import node
 from turtle import forward
 import numpy as np
 
@@ -258,7 +259,7 @@ class Actor(nn.Module):
         edges_2 = torch.cat([edges, edges_2], dim=-1)
         edges_2 = self.mlp_e2(edges_2)
         #shape: [n_batch, n_edges, edge_dim]
-        actions = self.fc_out(edges_2)
+        actions = torch.tanh(self.fc_out(edges_2))
         #shape: [n_batch, n_edges, 1]
 
         return actions 
@@ -270,5 +271,96 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     """
-    evaluate the Q(s,a) value
+    approximate the reward given states and actions
     """
+    def __init__(self, n_in, traj_hidden, node_dim, edge_dim, graph_dim ,kernel_size,
+                depth, do_prob=0.3):
+        super(Critic, self).__init__()
+        self.tcn_encoder = TCNEncoder(n_in, traj_hidden, node_dim, kernel_size, 
+                                     depth, do_prob)
+        self.mlp_e1 = MLP(1, edge_dim, edge_dim)
+        self.mlp_n1 = MLP(edge_dim+node_dim+graph_dim, node_dim, node_dim)
+        self.mlp_e2 = MLP(edge_dim+node_dim+graph_dim, edge_dim, edge_dim)
+        self.mlp_g1 = MLP(edge_dim+node_dim, graph_dim, graph_dim)
+        self.mlp_g2 = MLP(edge_dim+node_dim, graph_dim, 1)
+
+    def node2edge(self, x, rel_rec, rel_send):
+        """
+        args:
+           x: the node vector of trajectories
+              shape: [n_batch, n_atoms, node_dim]
+        """  
+        receivers = torch.matmul(rel_rec, x)
+        senders = torch.matmul(rel_send, x)
+        edges = receivers*senders
+        return edges
+
+    def edge2node(self, x, rel_rec, rel_send):
+        """
+        args:
+            x: the edge vector 
+                shape: [n_batch, n_edges, edge_dim]
+        """
+        incoming = torch.matmul(rel_rec.t(), x)
+        return incoming/incoming.size(1)
+
+    def en2graph(self, nodes, edges):
+        """
+        convert edges and nodes to graph properties
+        args:
+           nodes: [n_batch, n_nodes, node_dim]
+           edges: [n_batch, n_edges, edge_dim]
+        """
+        nodes_ave = nodes.mean(1)
+        edges_ave = edges.mean(1)   
+        g = torch.cat([nodes_ave, edges_ave], dim=-1)
+        #shape: [n_batch, node_dim+edge_dim]
+        return g
+
+    
+
+    def forward(self, trajs, actions, rel_rec, rel_send):
+        """
+        args:
+            trajs: [n_batch, n_nodes, n_timesteps, n_in]
+            actions: [n_batch, n_edges, 1]
+        """
+        nodes = self.tcn_encoder(trajs)
+        #shape: [n_batch, n_nodes, node_dim]
+        edges = self.mlp_e1(actions)
+        #shape: [n_batch, n_edges, edge_dim]
+        g1 = self.en2graph(nodes, edges)
+        #shape: [n_batch, node_dim+edge_dim]
+        g1 = g1.unsqueeze(1) #shape: [n_batch, 1, node_dim+edge_dim]
+        g1 = self.mlp_g1(g1)
+        # get node property
+        #shape: [n_batch, n_nodes, graph_dim]
+        nodes1 = self.edge2node(edges, rel_rec, rel_send)
+        #shape: [n_batch, n_nodes, edge_dim]
+        g1_prime = g1.expand(nodes.size(0), nodes.size(1), g1.size(-1))
+        #shape: [n_batch, n_nodes, nodes_dim+edge_dim]
+        nodes1 = torch.cat([nodes, nodes1, g1_prime], dim=-1)
+        #shape: [n_batch, n_nodes, node_dim+edge_dim+graph_dim]
+        nodes1 = self.mlp_n1(nodes1)
+        #shape: [n_batch, n_nodes, node_dim]
+        edges1 = self.node2edge(nodes1, rel_rec, rel_send)
+        #shape: [n_batch, n_edges, node_dim]
+        g1_prime = g1.expand(edges.size(0), edges.size(1), g1.size(-1))
+        #shape: [n_batch, n_nodes, nodes_dim+edge_dim]
+        edges1 = torch.cat([edges, edges1, g1_prime], dim=-1)
+        #shape: [n_batch, n_edges, node_dim+edge_dim+graph_dim]
+        edges1 = self.mlp_e2(edges1)
+        #shape: [n_batch, n_edges, edge_dim]
+        g2 = self.en2graph(nodes1, edges1)
+        #shape: [n_batch, node_dim+edge_dim]
+        g2.unsqueeze(1)
+        values = self.mlp_g2(g2)
+        #shape: [n_batch, 1]
+        values = values.squeeze(1)
+
+        return values
+        
+        
+        
+
+    
