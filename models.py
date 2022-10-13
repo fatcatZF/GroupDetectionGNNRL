@@ -1,10 +1,9 @@
-from platform import node
-from turtle import forward
 import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parameter import Parameter
 
 import math
 
@@ -204,15 +203,20 @@ class Actor(nn.Module):
     """
     A GNN actor maps state to action
     """
-    def __init__(self, n_in, traj_hidden, node_dim, edge_dim ,kernel_size, 
-                depth, do_prob=0.3):
+    def __init__(self, n_in, traj_hidden, node_dim, edge_dim, n_extractors ,kernel_size, 
+                depth, do_prob=0.3, mode="reinforce"):
         super(Actor, self).__init__()
         self.tcn_encoder = TCNEncoder(n_in, traj_hidden, node_dim, kernel_size, 
                                      depth, do_prob)
-        self.mlp_e1 = MLP(node_dim, edge_dim, edge_dim, do_prob)
+        self.mlp_e1 = MLP(n_extractors, edge_dim, edge_dim, do_prob)
         self.mlp_n1 = MLP(node_dim+edge_dim, node_dim, node_dim, do_prob)
-        self.mlp_e2 = MLP(node_dim+edge_dim, edge_dim, edge_dim, do_prob)
-        self.fc_out = nn.Linear(edge_dim, 1)
+        self.mlp_e2 = MLP(n_extractors+edge_dim, edge_dim, edge_dim, do_prob)
+        if mode=="reinforce":
+            self.fc_out = nn.Linear(edge_dim, 1)
+        else:
+            self.fc_out = nn.Linear(edge_dim, 2)
+        self.edge_extractors_l1 = nn.ParameterList([Parameter(torch.rand(node_dim)) for i in range(n_extractors)])
+        self.edge_extractors_l2 = nn.ParameterList([Parameter(torch.rand(node_dim)) for i in range(n_extractors)])
         self.init_weights()
         
     def init_weights(self):
@@ -221,7 +225,7 @@ class Actor(nn.Module):
                 nn.init.xavier_normal_(m.weight.data)
                 m.bias.data.fill_(0.1)
 
-    def node2edge(self, x, rel_rec, rel_send):
+    def node2edge(self, x, rel_rec, rel_send, layer):
         """
         args:
            x: the node vector of trajectories
@@ -229,7 +233,14 @@ class Actor(nn.Module):
         """
         receivers = torch.matmul(rel_rec, x)
         senders = torch.matmul(rel_send, x)
-        edges = receivers*senders
+        if layer==1:
+           edges = [(senders*D*receivers).sum(-1)/senders.size(-1) for D in self.edge_extractors_l1]
+        else:
+           edges = [(senders*D*receivers).sum(-1)/senders.size(-1) for D in self.edge_extractors_l2]
+        edges = torch.stack(edges)
+        edges = edges.permute(1,2,0)
+        #shape: [b_batch, n_edges, n_extractors]
+
         return edges
 
     def edge2node(self, x, rel_rec, rel_send):
@@ -244,8 +255,8 @@ class Actor(nn.Module):
     def forward(self, inputs, rel_rec, rel_send):
         nodes = self.tcn_encoder(inputs)
         #shape: [n_batch, n_nodes, node_dim]
-        edges = self.node2edge(nodes, rel_rec, rel_send)
-        #shape: [n_batch, n_edges, node_dim]
+        edges = self.node2edge(nodes, rel_rec, rel_send, 1)
+        #shape: [n_batch, n_edges, n_extractors]
         edges = self.mlp_e1(edges)
         #shape: [n_batch, n_edges, edge_dim]
         nodes_2 = self.edge2node(edges, rel_rec, rel_send)
@@ -254,17 +265,16 @@ class Actor(nn.Module):
         #shape: [n_batch, n_nodes, node_dim+edge_dim]
         nodes_2 = self.mlp_n1(nodes_2)
         #shape: [n_batch, n_nodes, node_dim]
-        edges_2 = self.node2edge(nodes_2, rel_rec, rel_send)
-        #shape: [n_batch, n_edges, node_dim]
+        edges_2 = self.node2edge(nodes_2, rel_rec, rel_send, 2)
+        #shape: [n_batch, n_edges, n_extractors]
         edges_2 = torch.cat([edges, edges_2], dim=-1)
         edges_2 = self.mlp_e2(edges_2)
         #shape: [n_batch, n_edges, edge_dim]
-        actions = torch.tanh(self.fc_out(edges_2))
-        #shape: [n_batch, n_edges, 1]
+        out = self.fc_out(edges_2)
+        #shape: [n_batch, n_edges, 1/2]
 
-        return actions 
+        return out
         
-
 
 
 
@@ -360,7 +370,7 @@ class Critic(nn.Module):
 
         return values
         
-        
+      
         
 
     
