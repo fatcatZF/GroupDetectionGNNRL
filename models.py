@@ -398,10 +398,10 @@ class ReplayBuffer():
         self.rewards = deque([], maxlen=max_size)
         self.indices = [None]*batch_size
 
-    def add_experience(self, states, actions, rewards):
-        self.states.extend(states)
-        self.actions.extend(actions)
-        self.rewards.extend(rewards)
+    def add_experience(self, state, action, reward):
+        self.states.append(state)
+        self.actions.append(action)
+        self.rewards.append(reward)
 
     def get_valid_indices(self):
         experience_size = len(self.states)
