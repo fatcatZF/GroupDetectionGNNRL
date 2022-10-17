@@ -10,6 +10,8 @@ import math
 import itertools
 from itertools import combinations
 
+from collections import deque
+
 from utils import *
 
 
@@ -375,6 +377,54 @@ class Critic(nn.Module):
         #shape: [n_batch, 1]
 
         return Q
+
+"""Replay Buffer"""
+
+
+class ReplayBuffer():
+    """Replay Buffer stores the last N transitions."""
+
+    def __init__(self, max_size=10000, batch_size=64):
+        """
+        args: 
+            max_size: the maximal number of the stored transitions
+            batch_size: the number of transitions returned in a minibatch
+        """
+        self.max_size = max_size
+        self.batch_size = batch_size
+        self.states = deque([], maxlen=max_size)
+        self.actions = deque([], maxlen=max_size)
+        self.rewards = deque([], maxlen=max_size)
+        self.indices = [None]*batch_size
+
+    def add_experience(self, states, actions, rewards):
+        self.states.extend(states)
+        self.actions.extend(actions)
+        self.rewards.extend(rewards)
+
+    def get_valid_indices(self):
+        experience_size = len(self.states)
+        for i in range(self.batch_size):
+            index = random.randint(0, experience_size-1)
+            self.indices[i] = index
+
+    def get_minibatch(self):
+        """
+        Return a minibatch
+        """
+        batch = []
+        self.get_valid_indices()
+
+        for idx in self.indices:
+            state = self.states[idx]
+            action = self.actions[idx]
+            reward = self.rewards[idx]
+
+            batch.append((state, action, reward))
+
+        return batch
+
+
 
 
 
