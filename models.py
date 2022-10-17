@@ -427,6 +427,61 @@ class ReplayBuffer():
 
 
 
+"""Noise"""
+
+class OUActionNoise:
+    """
+    Exploration Noise
+    copied from:
+        https://keras.io/examples/rl/ddpg_pendulum/
+    """
+    def __init__(self, mean, std_deviation, theta=0.15, dt=1e-2, x_initial=None):
+        self.theta = theta
+        self.mean = mean
+        self.std_dev = std_deviation
+        self.dt = dt
+        self.x_initial = x_initial
+        self.reset()
+
+    def __call__(self):
+        # Formula taken from https://www.wikipedia.org/wiki/Ornstein-Uhlenbeck_process.
+        x = (
+            self.x_prev
+            + self.theta * (self.mean - self.x_prev) * self.dt
+            + self.std_dev * np.sqrt(self.dt) * np.random.normal()
+        )
+        # Store x into x_prev
+        # Makes next noise dependent on current one
+        self.x_prev = x
+        return x
+
+    def reset(self):
+        if self.x_initial is not None:
+            self.x_prev = self.x_initial
+        else:
+            self.x_prev = np.zeros_like(self.mean)
+
+
+def add_symmetric_noise(actions, num_nodes, rel_rec, rel_send ,ou_noise):
+    """
+    args:
+      actions; shape: [n_batch, n_actions, 1]
+    """
+    off_diag_idx = np.ravel_multi_index(
+        np.where(np.ones((num_nodes,num_nodes))-np.eye(num_nodes)),
+        [num_nodes,num_nodes]
+    )
+    n_edges = actions.size(1)
+    noises = torch.tensor([ouaction_noise() for t in range(n_edges)])
+    noises_mat = torch.matmul(rel_send.t().float(), 
+                              torch.matmul(torch.diag_embed(noises.float()), 
+                              rel_rec.float()))
+    noise_sym = 0.5*(noises_mat+noises_mat.t()).reshape(-1)[off_diag_idx]
+    return torch.clip(noise_sym.reshape(actions.size(0), actions.size(1), actions.size(-1))+actions, -1, 1)
+
+
+
+
 
 
 
