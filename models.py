@@ -213,7 +213,7 @@ class Actor(nn.Module):
         self.tcn_encoder = TCNEncoder(n_in, traj_hidden, node_dim, kernel_size, 
                                      depth, do_prob)
         self.mlp_e1 = MLP(n_extractors, edge_dim, edge_dim, do_prob=0)
-        self.mlp_n1 = MLP(node_dim+edge_dim, node_dim, node_dim, do_prob)
+        self.mlp_n1 = MLP(node_dim+edge_dim, node_dim, node_dim, do_prob=0)
         self.mlp_e2 = MLP(n_extractors+edge_dim, edge_dim, edge_dim, do_prob=0)
         if mode=="reinforce":
             self.fc_out = nn.Linear(edge_dim, 1)
@@ -285,28 +285,52 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     """
-    approximate the reward given states and actions
+    A GNN Critic learns the Q(s,a)
     """
-    def __init__(self, n_in, traj_hidden, node_dim, edge_dim, graph_dim ,kernel_size,
-                depth, do_prob=0.3):
+    def __init__(self, n_in, traj_hidden, node_dim, edge_dim, n_extractors, kernel_size, depth,
+                do_prob=0.3, max_nodes=20):
         super(Critic, self).__init__()
         self.tcn_encoder = TCNEncoder(n_in, traj_hidden, node_dim, kernel_size, 
                                      depth, do_prob)
-        self.mlp_e1 = MLP(1, edge_dim, edge_dim)
-        self.mlp_n1 = MLP(edge_dim+node_dim+graph_dim, node_dim, node_dim)
-        self.mlp_e2 = MLP(edge_dim+node_dim+graph_dim, edge_dim, edge_dim)
-        self.mlp_g1 = MLP(edge_dim+node_dim, graph_dim, graph_dim)
-        self.mlp_g2 = MLP(edge_dim+node_dim, graph_dim, 1)
+        #get the node embedding at level 0
+        self.fc_e0 = nn.Linear(1, edge_dim)
+        #embed the input edge features (actions)
+        self.mlp_e1 = MLP(n_extractors+edge_dim, edge_dim, edge_dim, do_prob=0)
+        self.mlp_n1 = MLP(node_dim+edge_dim, node_dim, node_dim, do_prob=0)
+        #node representation at level 1
+        self.mlp_e2 = MLP(n_extractors+edge_dim, edge_dim, edge_dim, do_prob=0)
+        self.mlp_n2 = MLP(node_dim+edge_dim, node_dim, node_dim, do_prob=0.)
+        #node representation at level 2
+        self.fc_out = nn.Linear(3*node_dim, 1)
+        # readout the Q value
+        self.max_nodes = max_nodes
+        self.edge_extractors_l1 = nn.ParameterList([Parameter(torch.rand(node_dim)) for i in range(n_extractors)])
+        self.edge_extractors_l2 = nn.ParameterList([Parameter(torch.rand(node_dim)) for i in range(n_extractors)])
+        self.init_weights()
 
-    def node2edge(self, x, rel_rec, rel_send):
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight.data)
+                m.bias.data.fill_(0.1)
+
+
+    def node2edge(self, x, rel_rec, rel_send, layer):
         """
         args:
            x: the node vector of trajectories
               shape: [n_batch, n_atoms, node_dim]
-        """  
+        """
         receivers = torch.matmul(rel_rec, x)
         senders = torch.matmul(rel_send, x)
-        edges = receivers*senders
+        if layer==1:
+           edges = [(senders*D*receivers).sum(-1)/senders.size(-1) for D in self.edge_extractors_l1]
+        else:
+           edges = [(senders*D*receivers).sum(-1)/senders.size(-1) for D in self.edge_extractors_l2]
+        edges = torch.stack(edges)
+        edges = edges.permute(1,2,0)
+        #shape: [b_batch, n_edges, n_extractors]
+
         return edges
 
     def edge2node(self, x, rel_rec, rel_send):
@@ -318,61 +342,71 @@ class Critic(nn.Module):
         incoming = torch.matmul(rel_rec.t(), x)
         return incoming/incoming.size(1)
 
-    def en2graph(self, nodes, edges):
-        """
-        convert edges and nodes to graph properties
-        args:
-           nodes: [n_batch, n_nodes, node_dim]
-           edges: [n_batch, n_edges, edge_dim]
-        """
-        nodes_ave = nodes.mean(1)
-        edges_ave = edges.mean(1)   
-        g = torch.cat([nodes_ave, edges_ave], dim=-1)
-        #shape: [n_batch, node_dim+edge_dim]
-        return g
+    
+    def forward(self, inputs, actions, rel_rec, rel_send):
+        nodes_0 = self.tcn_encoder(inputs)
+        #level 0 node representations; shape: [n_batch, n_nodes, node_dim]
+        edges_0 = F.elu(self.fc_e0(actions))
+        #level 0 edge representations; shape: [n_batch, n_edges, edge_dim]
+        edges_1 = self.node2edge(nodes_0, rel_rec, rel_send, 1)
+        #shape: [n_batch, n_edges, n_extractors]
+        edges_1 = self.mlp_e1(torch.cat([edges_0, edges_1], dim=-1))
+        #shape: [n_batch, n_edges, n_extractors+edge_dim]
+        nodes_1 = self.edge2node(edges_1, rel_rec, rel_send)
+        #shape: [n_batch, n_nodes, edge_dim]
+        nodes_1 = torch.cat([nodes_0, nodes_1], dim=-1)
+        #shape: [n_batch, n_nodes, node_dim+edge_dim]
+        nodes_1 = self.mlp_n1(nodes_1)
+        #shape: [n_batch, n_nodes, node_dim]
+        edges_2 = self.node2edge(nodes_1, rel_rec, rel_send, 2)
+        #shape: [n_batch, n_edges, n_extractors]
+        edges_2 = torch.cat([edges_1, edges_2], dim=-1)
+        edges_2 = self.mlp_e2(edges_2)
+        #shape: [n_batch, n_edges, edge_dim]
+        nodes_2 = self.edge2node(edges_2, rel_rec, rel_send)
+        nodes_2 = torch.cat([nodes_1, nodes_2], dim=-1)
+        nodes_2 = self.mlp_n2(nodes_2)
+        #shape: [n_batch, n_nodes, node_dim]
+        nodes_all = torch.cat([nodes_0, nodes_1, nodes_2], dim=-1)
+        #shape: [n_batch, n_nodes, 3*node_dim]
+        nodes_all = nodes_all.sum(1)/self.max_nodes
+        #shape: [n_batch, 3*node_dim]
+        Q = self.fc_out(nodes_all)
+        #shape: [n_batch, 1]
+
+        return Q
+
+
+
+
 
     
 
-    def forward(self, trajs, actions, rel_rec, rel_send):
-        """
-        args:
-            trajs: [n_batch, n_nodes, n_timesteps, n_in]
-            actions: [n_batch, n_edges, 1]
-        """
-        nodes = self.tcn_encoder(trajs)
-        #shape: [n_batch, n_nodes, node_dim]
-        edges = self.mlp_e1(actions)
-        #shape: [n_batch, n_edges, edge_dim]
-        g1 = self.en2graph(nodes, edges)
-        #shape: [n_batch, node_dim+edge_dim]
-        g1 = g1.unsqueeze(1) #shape: [n_batch, 1, node_dim+edge_dim]
-        g1 = self.mlp_g1(g1)
-        # get node property
-        #shape: [n_batch, n_nodes, graph_dim]
-        nodes1 = self.edge2node(edges, rel_rec, rel_send)
-        #shape: [n_batch, n_nodes, edge_dim]
-        g1_prime = g1.expand(nodes.size(0), nodes.size(1), g1.size(-1))
-        #shape: [n_batch, n_nodes, nodes_dim+edge_dim]
-        nodes1 = torch.cat([nodes, nodes1, g1_prime], dim=-1)
-        #shape: [n_batch, n_nodes, node_dim+edge_dim+graph_dim]
-        nodes1 = self.mlp_n1(nodes1)
-        #shape: [n_batch, n_nodes, node_dim]
-        edges1 = self.node2edge(nodes1, rel_rec, rel_send)
-        #shape: [n_batch, n_edges, node_dim]
-        g1_prime = g1.expand(edges.size(0), edges.size(1), g1.size(-1))
-        #shape: [n_batch, n_nodes, nodes_dim+edge_dim]
-        edges1 = torch.cat([edges, edges1, g1_prime], dim=-1)
-        #shape: [n_batch, n_edges, node_dim+edge_dim+graph_dim]
-        edges1 = self.mlp_e2(edges1)
-        #shape: [n_batch, n_edges, edge_dim]
-        g2 = self.en2graph(nodes1, edges1)
-        #shape: [n_batch, node_dim+edge_dim]
-        g2.unsqueeze(1)
-        values = self.mlp_g2(g2)
-        #shape: [n_batch, 1]
-        values = values.squeeze(1)
 
-        return values
+
+    
+
+
+
+    
+
+    
+
+    
+
+
+    
+
+    
+
+
+
+
+
+
+
+
+
         
       
         
