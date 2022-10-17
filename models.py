@@ -483,37 +483,6 @@ def add_symmetric_noise(actions, num_nodes, rel_rec, rel_send ,ou_noise):
 
 
 
-
-
-
-    
-
-
-
-    
-
-
-
-    
-
-    
-
-    
-
-
-    
-
-    
-
-
-
-
-
-
-
-
-
-        
       
         
 
@@ -611,6 +580,13 @@ def greedy_approximate_best_clustering(sims):
             return current_clustering, current_score
         cluster_indices = list(range(current_num_clusters))
         merge_2_indices = list(combinations(cluster_indices, 2))
+
+# compute actions to similarity matrix
+def actions_to_sims(actions):
+    sims = actions.cpu().detach().squeeze()
+    sims_mat = torch.matmul(rel_send.t(), 
+                        torch.matmul(torch.diag_embed(sims), rel_rec))
+    return sims_mat.numpy()
 
 
 
