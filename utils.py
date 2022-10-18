@@ -3,6 +3,9 @@ import numpy as np
 import torch 
 import torch.nn as nn 
 
+from itertools import combinations
+from operator import itemgetter
+
 
 
 def encode_onehot(labels):
@@ -143,6 +146,8 @@ def edge_recall_prob(preds, target, threshold=0.7):
 
 
 
+"""Group Mitre"""
+
 def indices_to_clusters(l):
     """
     args:
@@ -159,34 +164,58 @@ def indices_to_clusters(l):
 
 
 
-def compute_mitre(a, b):
-    """
-    compute mitre 
-    more details: https://aclanthology.org/M95-1005.pdf
-    args:
-      a,b: list of groups; e.g. a=[[1.2],[3],[4]], b=[[1,2,3],[4]]
-    Return: 
-      mitreLoss a_b
+#def compute_mitre(a, b):
+#    """
+#    compute mitre 
+#    more details: https://aclanthology.org/M95-1005.pdf
+#    args:
+#      a,b: list of groups; e.g. a=[[1.2],[3],[4]], b=[[1,2,3],[4]]
+#    Return: 
+#      mitreLoss a_b
       
-    """
-    total_m = 0 #total missing links
-    total_c = 0 #total correct links
-    for group_a in a:
-        pa = 0 #partitions of group_a in b
-        part_group = []#partition group
-        size_a = len(group_a) #size of group a
-        for element in group_a:
-            for group_b in b:
-                if element in group_b:
-                    if part_group==group_b:
-                        continue
-                    else:
-                        part_group = group_b
-                        pa+=1
-        total_c += size_a-1
-        total_m += pa-1
+#    """
+#    total_m = 0 #total missing links
+#    total_c = 0 #total correct links
+#    for group_a in a:
+#        pa = 0 #partitions of group_a in b
+#        part_group = []#partition group
+#        size_a = len(group_a) #size of group a
+#        for element in group_a:
+#            for group_b in b:
+#                if element in group_b:
+#                    if part_group==group_b:
+#                        continue
+#                    else:
+#                        part_group = group_b
+#                        pa+=1
+#        total_c += size_a-1
+#        total_m += pa-1
         
-    return (total_c-total_m)/total_c
+#    return (total_c-total_m)/total_c
+
+def compute_mitre(target, predict):
+    target_sets = [set(c) for c in target]
+    predict_sets = [set(c) for c in predict]
+    total_misses = 0.
+    total_corrects = 0.
+    size_predict = len(predict_sets)
+    for cl in target_sets:
+        size_cl = len(cl)
+        total_corrects += size_cl-1
+        if size_cl==1:
+            continue
+        if True in [cl.issubset(cp) for cp in predict_sets]:
+            continue
+        possible_misses = range(1, min(size_cl-1, size_predict-1)+1)
+        print(list(possible_misses))
+        for n_miss in possible_misses:
+            indi_combs = list(combinations(range(size_predict), n_miss+1))
+            possible_comb_sets = [set().union(*(itemgetter(*a)(predict_sets))) for a in indi_combs]
+            if True in [cl.issubset(cp) for cp in possible_comb_sets]:
+                total_misses+=n_miss
+                break
+                
+    return (total_corrects-total_misses)/total_corrects
 
 
 def create_counterPart(a):
