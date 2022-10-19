@@ -25,6 +25,8 @@ parser.add_argument("--no-cuda", action="store_true", default=False,
                     help="Disables CUDA training.")
 parser.add_argument("--noise-std", type=float, default=0.3,
             help="Standard deviation of the exploration noise.")
+parser.add_argument("--noise-std-good", type=float, default=0.5,
+            help="Standard deviation of the good exploration noise.")
 parser.add_argument("--replay-size", type=int, default=10000,
             help="maximal replay buffer size.")
 parser.add_argument("--batch-size", type=int, default=128,
@@ -45,11 +47,11 @@ parser.add_argument("--n-in", type=int, default=2,
                     help="Dimension of input.")
 parser.add_argument("--traj-hidden", type=int, default=32, 
                     help="hidden dimension of trajectories.")
-parser.add_argument("--node-dim", type=int, default=64, 
+parser.add_argument("--node-dim", type=int, default=128, 
                     help="Dimension of node network.")
-parser.add_argument("--edge-dim", type=int, default=64,
+parser.add_argument("--edge-dim", type=int, default=128,
                     help="Dimension of edge network.")
-parser.add_argument("--n-extractors", type=int, default=32,
+parser.add_argument("--n-extractors", type=int, default=64,
                     help="Number of edge feature extractors.")
 parser.add_argument("--kernel-size", type=int, default=5, 
                     help="kernel size of temporal convolution.")
@@ -146,6 +148,7 @@ loss_critic = nn.SmoothL1Loss(args.beta)
 
 replay_buffer = ReplayBuffer(max_size=args.replay_size, batch_size=args.batch_size)
 ou_noise = OUActionNoise(0, args.noise_std)
+ou_noise_good = OUActionNoise(0, args.noise_std_good)
 
 
 def act(state, rel_rec, rel_send):
@@ -201,6 +204,83 @@ def explore(episode):
             reward = compute_reward_f1(F1)
 
             replay_buffer.add_experience(example, actions, reward)
+
+
+def explore_good(episode):
+    """explore good fake actions"""
+    training_indices = np.arange(len(examples_train))
+    np.random.shuffle(training_indices)
+    for idx in training_indices:
+        example = examples_train[idx]
+        num_nodes = example.size(0)
+        #create mask
+        #create mask
+        mask = np.random.choice([0,1],size=(num_nodes,num_nodes),p=[0.2,0.8])
+        mask = 0.5*(mask+mask.T)
+        off_diag_idx = np.ravel_multi_index(np.where(np.ones((num_nodes,num_nodes))-np.eye(num_nodes)),
+                                   [num_nodes,num_nodes])
+        mask = torch.from_numpy(mask.reshape(-1)[off_diag_idx]).float()
+        mask = mask.unsqueeze(0).unsqueeze(-1)
+
+        rel_rec, rel_send = create_edgeNode_relation(num_nodes)
+        label = labels_train[idx]
+        label_diag = torch.diag_embed(label).float()
+        label_converted = torch.matmul(rel_send.t(),
+                              torch.matmul(label_diag, rel_rec))
+        label_converted = label_converted.cpu().detach().numpy()
+        #shape: [n_nodes, n_nodes]
+        if label_converted.sum()==0:
+            gID = list(range(label_converted.shape[1]))
+        else:
+            gID = list(get_connected_components(label_converted))
+        gID = indices_to_clusters(gID)
+        
+        label_action = label.unsqueeze(0).unsqueeze(-1)*mask
+        if random.random()<0.5: #whether convert the range to [-1,1]
+            label_action = 2*(label_action-0.5)
+        actions = add_symmetric_noise(label_action, num_nodes, rel_rec, rel_send, ou_noise_good)
+        sims = actions_to_sims(actions, rel_rec, rel_send)
+        g_predict, _ = greedy_approximate_best_clustering(sims)
+        recall, precision, F1 = compute_groupMitre(gID, g_predict)
+        reward = compute_reward_f1(F1)
+
+        replay_buffer.add_experience(example.unsqueeze(0), actions, reward)
+
+
+
+
+def explore_random(episode):
+    """explore random actions."""
+    training_indices = np.arange(len(examples_train))
+    np.random.shuffle(training_indices)
+    for idx in training_indices:
+        example = examples_train[idx]
+        num_nodes = example.size(0)
+        actions = np.random.uniform(-1,1, size=(num_nodes, num_nodes))
+        actions = 0.5*(actions+actions.T)
+        off_diag_idx = np.ravel_multi_index(np.where(np.ones((num_nodes,num_nodes))-np.eye(num_nodes)),
+                                   [num_nodes,num_nodes])
+        actions = torch.from_numpy(actions.reshape(-1)[off_diag_idx]).float()
+        actions = actions.unsqueeze(0).unsqueeze(-1)
+
+        rel_rec, rel_send = create_edgeNode_relation(num_nodes)
+        label = labels_train[idx]
+        label_diag = torch.diag_embed(label).float()
+        label_converted = torch.matmul(rel_send.t(),
+                              torch.matmul(label_diag, rel_rec))
+        label_converted = label_converted.cpu().detach().numpy()
+        #shape: [n_nodes, n_nodes]
+        if label_converted.sum()==0:
+           gID = list(range(label_converted.shape[1]))
+        else:
+            gID = list(get_connected_components(label_converted))
+
+        gID = indices_to_clusters(gID)
+        sims = actions_to_sims(actions, rel_rec, rel_send)
+        g_predict, _ = greedy_approximate_best_clustering(sims)
+        recall, precision, F1 = compute_groupMitre(gID, g_predict)
+        reward = compute_reward_f1(F1)
+        replay_buffer.add_experience(example.unsqueeze(0), actions, reward)
 
 
 
@@ -374,8 +454,8 @@ def update_params(episode):
                 state = state.cuda()
                 rel_rec, rel_send = rel_rec.cuda(), rel_send.cuda()
             
-            action = torch.tanh(actor(state, rel_rec, rel_send))
-            Q = torch.tanh(critic(state, action, rel_rec, rel_send))
+            action = torch.tanh(actor(state.float(), rel_rec.float(), rel_send.float()))
+            Q = torch.tanh(critic(state.float(), action.float(), rel_rec.float(), rel_send.float()))
             #shape: [1, 1]
             actor_loss = -Q/args.batch_size
             actor_loss.backward()
@@ -391,6 +471,8 @@ def update_params(episode):
 
 def train(episode, best_F1):
     explore(episode)
+    explore_good(episode)
+    explore_random(episode)
     update_params(episode)
     recall_val, precision_val, F1_val, rewards_val, loss_val = validate(episode)
     print("Epoch: {:04d}".format(episode),
