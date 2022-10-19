@@ -202,12 +202,13 @@ def compute_mitre(target, predict):
     for cl in target_sets:
         size_cl = len(cl)
         total_corrects += size_cl-1
-        if size_cl==1:
+        if size_cl==1: # if the size of the cluster is 1, there are no missing links
             continue
         if True in [cl.issubset(cp) for cp in predict_sets]:
+            # if the cluster is a subset of a cluster in the predicts clustering,
+            # there are no missing links
             continue
         possible_misses = range(1, min(size_cl-1, size_predict-1)+1)
-        print(list(possible_misses))
         for n_miss in possible_misses:
             indi_combs = list(combinations(range(size_predict), n_miss+1))
             possible_comb_sets = [set().union(*(itemgetter(*a)(predict_sets))) for a in indi_combs]
